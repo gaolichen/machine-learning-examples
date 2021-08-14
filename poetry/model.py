@@ -12,6 +12,12 @@ from transformers import create_optimizer
 import utils
 import settings
 
+def get_activation(acc):
+    if not isinstance(acc, str):
+        return acc
+    if acc == 'gelu':
+        pass
+
 class MaskedPoetryModel(object):
     def __init__(self, bert_mlm, input_dim):
         self.bert_mlm = bert_mlm
