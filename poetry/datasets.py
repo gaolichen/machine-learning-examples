@@ -128,7 +128,8 @@ class ChinesePoetry(object):
     def _convert_to_simplify(json_obj):
       json_obj['author'] = convert(json_obj['author'], 'zh-cn')
       json_obj['title'] = convert(json_obj['title'], 'zh-cn')
-      json_obj['paragraphs'] = [filter_non_poetry_part(convert(p, 'zh-cn')) for p in json_obj['paragraphs']]
+      l = [filter_non_poetry_part(convert(p, 'zh-cn')) for p in json_obj['paragraphs']]
+      json_obj['paragraphs'] = [s for s in l if len(s) > 0]
       return json_obj
 
     @staticmethod
