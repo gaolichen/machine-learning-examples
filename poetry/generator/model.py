@@ -1,11 +1,16 @@
+# -*- coding: utf-8 -*-
+# @File    : model.py
+# @Author  : Gaoli Chen
+# @Time    : 2021/08/12
+# @Desc    :
+
 import tensorflow as tf
 import tensorflow.keras as keras
 
-import sys
-import os
-
-current = os.path.dirname(os.path.realpath(__file__))
-sys.path.append(os.path.join(current, '../../simplebert/src'))
+#import sys
+#import os
+#current = os.path.dirname(os.path.realpath(__file__))
+#sys.path.append(os.path.join(current, '../../../simplebert/src'))
 
 from simplebert.models import model_from_pretrained
 

@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+# @File    : poetry_generator.py
+# @Author  : Gaoli Chen
+# @Time    : 2021/08/12
+# @Desc    :
+
 import tensorflow as tf
 import numpy as np
 

@@ -1,22 +1,24 @@
+# -*- coding: utf-8 -*-
+# @File    : train.py
+# @Author  : Gaoli Chen
+# @Time    : 2021/08/12
+# @Desc    :
 
 from datetime import datetime
 import tensorflow.keras as keras
+
 from dataclasses import dataclass
-from poetry_generator.dataset import PoetDataGenerator
-from poetry_generator.poetry_generator import PoetryGenerator
-from poetry_generator.model import build_model
+from generator.dataset import PoetDataGenerator
+from generator.poetry_generator import PoetryGenerator
+from generator.model import build_model
+from datasets import ChinesePoetry
 
-import sys
 import os
-
+#import sys
 #current = os.path.dirname(os.path.realpath(__file__))
-#print(f'current={current}')
-#sys.path.append(os.path.join(current, '../../simplebert/src'))
-#sys.path.append(os.path.join(current, '..'))
+#sys.path.append(os.path.join(current, '../../../simplebert/src'))
 
-from datasets.poetry import ChinesePoetry
 from simplebert.tokenizers import tokenizer_from_pretrained
-
 
 @dataclass
 class Settings(object):
@@ -27,7 +29,7 @@ class Settings(object):
     model_name: str = 'bert-base-chinese'
     val_split: float = 0.1
     save_dir: str = '.'
-    download_size: float = 1.0
+    download_size: float = .1
 
 class RandomPoetCallback(keras.callbacks.Callback):
   def __init__(self, poetry_gen, file_name = None):
