@@ -74,5 +74,9 @@ class PoetryGenerator:
     return self.tokenizer.decode(poet_ids[1:])
   
   def random(self, topk = 5):
-    start = self.next_token(head = '', topk = 1000)
+    start = self.tokenizer.unk_token
+    # the first token should not be [UNK]
+    while start == self.tokenizer.unk_token:
+      start = self.next_token(head = '', topk = 1000)
+      
     return self.new_peot_with_start(start = start, topk = topk)
