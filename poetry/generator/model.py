@@ -7,12 +7,14 @@
 import tensorflow as tf
 import tensorflow.keras as keras
 
-#import sys
-#import os
-#current = os.path.dirname(os.path.realpath(__file__))
-#sys.path.append(os.path.join(current, '../../../simplebert/src'))
+import os
 
-from simplebert.models import model_from_pretrained
+if os.environ.get('SIMPLEBERT_LOCAL_SOURCE', '') == "1":
+    import sys
+    current = os.path.dirname(os.path.realpath(__file__))
+    sys.path.append(os.path.join(current, '../../../simplebert/src'))
+
+from simplebert import model_from_pretrained
 
 def poet_loss(from_logits = False):
   loss = keras.losses.SparseCategoricalCrossentropy(from_logits = from_logits, reduction = 'none')

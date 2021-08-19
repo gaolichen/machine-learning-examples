@@ -14,11 +14,14 @@ from generator.model import build_model
 from datasets import ChinesePoetry
 
 import os
-#import sys
-#current = os.path.dirname(os.path.realpath(__file__))
-#sys.path.append(os.path.join(current, '../../../simplebert/src'))
+import sys
 
-from simplebert.tokenizers import tokenizer_from_pretrained
+if os.environ.get('SIMPLEBERT_LOCAL_SOURCE', '') == "1":
+    current = os.path.dirname(os.path.realpath(__file__))
+    sys.path.append(os.path.join(current, '../../../simplebert/src'))
+
+from simplebert import tokenizer_from_pretrained, model_from_pretrained, config_from_pretrained
+from simplebert.models import BertModel
 
 @dataclass
 class Settings(object):
@@ -108,8 +111,41 @@ def train(settings):
                      validation_data = val_data,
                      epochs = settings.epochs,
                      callbacks = [RandomPoetCallback(pg, output_path)])
+
+def eval(settings, checkpoint_path):
+    tokenizer = tokenizer_from_pretrained(settings.model_name)
+    config = config_from_pretrained(settings.model_name)
+    model = BertModel(config, model_head = 'lm', causal_attention = True, name = 'bert')
+    model.load_weights(checkpoint_path)
+    pg = PoetryGenerator(model = model, tokenizer = tokenizer, input_dim = settings.input_dim)
+
+    while True:
+        cmd = input('Enter one of the following commands: Start with(S), Heads with(H), quit(q):')
+        if cmd == 'S' or cmd == 'H':
+            poet = input('Enter peotry content:')
+            if cmd == 'S':
+                print(pg.new_peot_with_start(poet))
+            else:
+                print(pg.new_peot_with_heads(poet))
+        else:
+            break
     
 
 if __name__ == "__main__":
     settings = Settings()
-    train(settings)
+    
+    n = len(sys.argv)
+    if n >= 2:
+        cmd = sys.argv[1]
+    else:
+        cmd = '-train'
+    
+    if cmd == '-train':
+        train(settings)
+    elif cmd == '-eval':
+        checkpoint_path = None if n <3 else sys.argv[2]
+        if checkpoint_path == None:
+            raise ValueError('Invalid checkpoint path {checkpoint_path}')
+        eval(settings, checkpoint_path)
+    else:
+        raise ValueError(f'Invalid command {cmd}')

@@ -17,8 +17,7 @@ from masked_language_model.model import MaskedPoetryModel
 #sys.path.append(os.path.join(current, '../../../simplebert/src'))
 
 
-from simplebert.tokenizers import tokenizer_from_pretrained
-from simplebert.models import model_from_pretrained
+from simplebert import tokenizer_from_pretrained, model_from_pretrained
     
 
 def text_width(text):
