@@ -9,79 +9,110 @@ import math
 
 dim = 2
 N = 10000
-noise_size = 0.1
-center = 1 + np.random.random((dim,))
-noise = noise_size * (np.random.random((N, dim)) - 0.5)
 
-def f(x, i):
-    return np.dot(x - center - noise[i], x - center - noise[i])
+class Function(object):
+    def __init__(self, noise_size = .0, eliptical = False):
+        self.noise_size = noise_size
+        self.eliptical = eliptical
+        self._gen_data()
 
+    def _gen_data(self):
+        self.center = 1 + np.random.random((dim,))
+        if self.eliptical:
+            self.axis = np.random.random((dim, )) + 1e-8
+        else:
+            self.axis = np.ones((dim, ))
 
-def f_derivative(x, i):
-    return 2 * (x - center - noise[i])
+        self.noise = (2 * self.noise_size) * (np.random.random((N, dim)) - 0.5)
+        print(f'noise mean={np.mean(self.noise)}, noise std={np.std(self.noise)}, {self.axis[0]/self.axis[1]}')
 
-class Adam(object):
-    def __init__(self, beta1, beta2, alpha):
-        self.beta1 = beta1
-        self.beta2 = beta2
-        self.alpha = alpha
-        self.accuracy = 1e-8
+    def __call__(self, x, step):
+        v = (x - self.center - self.noise[step]) / self.axis
+        return np.dot(v, v)
 
+    def derivative(self, x, step):
+        return 2 * (x - self.center - self.noise[step]) / self.axis
 
-    def __call__(self, fun, fun_der):
-        m, v = 0.0, 0.0
+class Solver(object):
+    def __init__(self, learning_rate, accuracy):
+        self.learing_rate = learning_rate
+        self.accuracy = accuracy
+        
+    def __call__(self, function, optimizer):
         x = [.0] * dim
         for i in range(N):
-            g = fun_der(x, i)
-            g2 = np.multiply(g, g)
-            m = self.beta1 * m + (1 - self.beta1) * g
-            v = self.beta2 * v + (1 - self.beta2) * g2
-            m_hat = m / (1 - self.beta1)
-            v_hat = np.sqrt(v / (1 - self.beta2))
-            delta = self.alpha * m_hat / (v_hat + 1e-8)
-            x -= delta
-            if i % 1000 == 0:
-                print('i=', i, 'delta=', math.sqrt(np.dot(delta, delta)), 'f(x)=', fun(x, i))
-            if math.sqrt(np.dot(delta, delta)) < self.accuracy:
+            dx = self.learing_rate * optimizer(function, x, i)
+            x -= dx
+            
+            if math.sqrt(np.dot(dx, dx)) < self.accuracy:
                 break
 
-        return x, i
+        return x, i + 1
+
+class SGD(object):
+    def __call__(self, fun, x, step):
+        return fun.derivative(x, step)
+
 
 class RMSProp(object):
-    def __init__(self, rho, step_size):
+    def __init__(self, rho):
         self.rho = rho
-        self.accuracy = 1e-8
-        self.step_size = step_size
+        self.s = .0
 
-    def __call__(self, fun, fun_der):
-        s = .0
-        x = [.0] * dim
-        for i in range(N):
-            g = fun_der(x, i)
-            s = s * self.rho + (1 - self.rho) * np.multiply(g, g)
-            delta = self.step_size * g / (1e-8 + np.sqrt(s))
-            x -= delta
-            if i % 1000 == 0:
-                print('i=', i, 'delta=', math.sqrt(np.dot(delta, delta)), 'f(x)=', fun(x, i))
-            if math.sqrt(np.dot(delta, delta)) < self.accuracy:
-                break
-            
-        return x, i
+    def __call__(self, fun, x, step):
+        g = fun.derivative(x, step)
+        g2 = np.multiply(g, g)
 
-def compare_rmsp_adam():
-    adam = Adam(beta1 = 0.9, beta2 = 0.999, alpha = 1e-3)
-    res1, step1 = adam(f, f_derivative)
+        self.s = self.rho * self.s + (1 - self.rho) * g2
+
+        return g / (np.sqrt(self.s) + 1e-8)
+
+
+class Adam(object):
+    def __init__(self, beta1, beta2):
+        self.beta1 = beta1
+        self.beta2 = beta2
+
+        self.m = self.v = .0
+
+    def __call__(self, fun, x, step):
+        g = fun.derivative(x, step)
+        g2 = np.multiply(g, g)
+
+        self.m = self.beta1 * self.m + (1 - self.beta1) * g
+        self.v = self.beta2 * self.v + (1 - self.beta2) * g2
+
+        m_hat = self.m / (1 - self.beta1)
+        v_hat = np.sqrt(self.v / (1 - self.beta2))
+        
+        return m_hat / (v_hat + 1e-8)
+
+
+def compare_optimizers():
+    solver = Solver(learning_rate = 1e-3, accuracy = 1e-8)
     
-    rmsp = RMSProp(rho = 0.9, step_size = 1e-3)
-    res2, step2 = rmsp(f, f_derivative)
+    for i in range(10):
+        print(f'run {i}')
+        fun = Function(noise_size = .5)
+        solution = fun.center
+        
+        sgd = SGD()
+        rmsp = RMSProp(rho = 0.9)
+        adam = Adam(beta1 = 0.9, beta2 = 0.999)
 
-    error1 = res1 - center
-    error2 = res2 - center
+        res1, step1 = solver(fun, sgd)
+        res2, step2 = solver(fun, rmsp)
+        res3, step3 = solver(fun, adam)
+        
+        error1 = math.sqrt(np.dot(res1 - solution, res1 - solution))
+        error2 = math.sqrt(np.dot(res2 - solution, res2 - solution))
+        error3 = math.sqrt(np.dot(res3 - solution, res3 - solution))
 
-    print('noise mean=', np.mean(noise), 'sigma=', np.std(noise))
-    print('adam: target=', center, 'res=', res1, 'error=', error1, '|error1|=', math.sqrt(np.dot(error1, error1)), 'step1 =', step1)
-    print('rmsp: target=', center, 'res=', res2, 'error=', error2, '|error2|=', math.sqrt(np.dot(error2, error2)), 'step2 =', step2)
-
-
+        print(f'solution={solution}')
+        print(f'res1={res1}, error1={error1}, step1={step1}')
+        print(f'res2={res2}, error2={error2}, step2={step2}')
+        print(f'res3={res3}, error3={error3}, step3={step3}')
+        print()
+    
 if __name__ == "__main__":
-    compare_rmsp_adam()
+    compare_optimizers()
