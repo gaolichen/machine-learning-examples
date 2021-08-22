@@ -11,14 +11,14 @@ dim = 2
 N = 10000
 
 class Function(object):
-    def __init__(self, noise_size = .0, eliptical = False):
+    def __init__(self, noise_size = .0, circular = True):
         self.noise_size = noise_size
-        self.eliptical = eliptical
+        self.circular = circular
         self._gen_data()
 
     def _gen_data(self):
         self.center = 1 + np.random.random((dim,))
-        if self.eliptical:
+        if not self.circular:
             self.axis = np.random.random((dim, )) + 1e-8
         else:
             self.axis = np.ones((dim, ))
@@ -93,7 +93,7 @@ def compare_optimizers():
     
     for i in range(10):
         print(f'run {i}')
-        fun = Function(noise_size = .5)
+        fun = Function(noise_size = 0.5, circular = False)
         solution = fun.center
         
         sgd = SGD()
