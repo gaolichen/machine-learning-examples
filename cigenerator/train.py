@@ -24,7 +24,7 @@ from simplebert.models import BertModel
 
 @dataclass
 class Settings(object):
-    epochs: int = 5
+    epochs: int = 9
     batch_size: int = 32
     input_dim: int = 256
     learning_rate: float = 5e-5
