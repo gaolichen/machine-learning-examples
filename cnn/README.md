@@ -5,8 +5,8 @@
 - 所有图片转化成150*150大小
 
 ## 主要模型：
-- 自定义的CNN模型
-- 预训练的模型：VGG16,VGG19,ResNet50V2等
+- 自定义的CNN模型：
+- 微调预训练的模型：VGG16,VGG19,ResNet50V2等
 
 ## 运行方法
 - 在colab上打开notebook [dog_vs_cat.ipynb](dog_vs_cat.ipynb)
@@ -14,3 +14,15 @@
 - 切换到GPU加速器，运行notebook
 
 ## 结果
+自定义的CNN模型:
+
+![自定义CNN模型](plots/custom.png)
+
+VGG16微调:
+![VGG16微调](plots/vgg16.png)
+
+VGG19微调:
+![VGG16微调](plots/vgg19.png)
+
+ResNet50V2微调:
+![ResNet50V2微调](plots/resnet50v2.png)
