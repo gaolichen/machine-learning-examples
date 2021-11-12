@@ -8,7 +8,6 @@ from __future__ import unicode_literals
 import os
 import numpy as np
 import shutil
-import deepchem as dc
 from muv_datasets import load_muv
 import metrics
 import models
