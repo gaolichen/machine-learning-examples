@@ -4,7 +4,7 @@
 ```shell
 python3 -m pip install rdkit-pypi
 ```
-Other dependence may includes: tensorflow, pytorch, scikit-learn.org
+Other dependence may includes: tensorflow, pytorch, scikit-learn
 
 ## Run method:
 ```
