@@ -1,39 +1,25 @@
 import numpy as np
-import torch
-import torch.nn.functional as F
-try:
-  import torch.utils.tensorboard
-  _has_tensorboard = True
-except:
-  _has_tensorboard = False
+import tensorflow as tf
 import time
 import logging
-import tempfile
 import os
-import shutil
 
 try:
   from collections.abc import Sequence as SequenceCollection
 except:
   from collections import Sequence as SequenceCollection
 
-from datasets import Dataset#, NumpyDataset
-from metrics import Metric, to_one_hot
-#from deepchem.models.losses import Loss
-#from deepchem.models.models import Model
+from datasets import Dataset, NumpyDataset
+from metrics import Metric
+from models import Loss
+from models import Model
 from optimizers import Adam, Optimizer, LearningRateSchedule
 from dctransformers import Transformer, undo_transforms
-#from deepchem.utils.evaluate import GeneratorEvaluator
-
-from sklearn.base import BaseEstimator
-
-from datasets import Dataset
-from evaluate import Evaluator
+from evaluate import GeneratorEvaluator
 
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 from dctyping import ArrayLike, LossFn, OneOrMany
 from wandblogger import WandbLogger
-from losses import Loss, SoftmaxCrossEntropy
 
 try:
   import wandb
@@ -50,257 +36,36 @@ except (ImportError, AttributeError):
 
 logger = logging.getLogger(__name__)
 
-class _StandardLoss(object):
-  """The implements the loss function for models that use a dc.models.losses.Loss."""
 
-  def __init__(self, model, loss: Loss) -> None:
-    self.model = model
-    self.loss = loss  # not used
-    self.criterion = loss._create_pytorch_loss()
-
-  def __call__(self, outputs: List, labels: List, weights: List) -> float:
-    if len(outputs) != 1 or len(labels) != 1 or len(weights) != 1:
-      raise ValueError(
-          "Loss functions expects exactly one each of outputs, labels, and weights"
-      )
-    losses = self.criterion(outputs[0], labels[0])
-    w = weights[0]
-    if len(w.shape) < len(losses.shape):
-      if isinstance(w, torch.Tensor):
-        shape = tuple(w.shape)
-      else:
-        shape = w.shape
-      shape = tuple(-1 if x is None else x for x in shape)
-      w = w.reshape(shape + (1,) * (len(losses.shape) - len(w.shape)))
-
-    loss = losses * w
-    loss = loss.mean()
-    if self.model.regularization_loss is not None:
-      loss += self.model.regularization_loss()
-    return loss
-
-
-class Model(BaseEstimator):
-  """
-  Abstract base class for DeepChem models.
-  """
-
-  def __init__(self, model=None, model_dir: Optional[str] = None,
-               **kwargs) -> None:
-    """Abstract class for all models.
-    This is intended only for convenience of subclass implementations
-    and should not be invoked directly.
-    Parameters
-    ----------
-    model: object
-      Wrapper around ScikitLearn/Keras/Tensorflow model object.
-    model_dir: str, optional (default None)
-      Path to directory where model will be stored. If not specified,
-      model will be stored in a temporary directory.
-    """
-    if self.__class__.__name__ == "Model":
-      raise ValueError(
-          "This constructor is for an abstract class and should never be called directly."
-          "Can only call from subclass constructors.")
-
-    self.model_dir_is_temp = False
-    if model_dir is not None:
-      if not os.path.exists(model_dir):
-        os.makedirs(model_dir)
-    else:
-      model_dir = tempfile.mkdtemp()
-      self.model_dir_is_temp = True
-    self.model_dir = model_dir
-    self.model = model
-    self.model_class = model.__class__
-
-  def __del__(self):
-    if 'model_dir_is_temp' in dir(self) and self.model_dir_is_temp:
-      shutil.rmtree(self.model_dir)
-
-  def fit_on_batch(self, X: Sequence, y: Sequence, w: Sequence):
-    """Perform a single step of training.
-    Parameters
-    ----------
-    X: np.ndarray
-      the inputs for the batch
-    y: np.ndarray
-      the labels for the batch
-    w: np.ndarray
-      the weights for the batch
-    """
-    raise NotImplementedError(
-        "Each model is responsible for its own fit_on_batch method.")
-
-  def predict_on_batch(self, X: ArrayLike):
-    """
-    Makes predictions on given batch of new data.
-    Parameters
-    ----------
-    X: np.ndarray
-      Features
-    """
-    raise NotImplementedError(
-        "Each model is responsible for its own predict_on_batch method.")
-
-  def reload(self) -> None:
-    """
-    Reload trained model from disk.
-    """
-    raise NotImplementedError(
-        "Each model is responsible for its own reload method.")
-
-  @staticmethod
-  def get_model_filename(model_dir: str) -> str:
-    """
-    Given model directory, obtain filename for the model itself.
-    """
-    return os.path.join(model_dir, "model.joblib")
-
-  @staticmethod
-  def get_params_filename(model_dir: str) -> str:
-    """
-    Given model directory, obtain filename for the model itself.
-    """
-    return os.path.join(model_dir, "model_params.joblib")
-
-  def save(self) -> None:
-    """Dispatcher function for saving.
-    Each subclass is responsible for overriding this method.
-    """
-    raise NotImplementedError
-
-  def fit(self, dataset: Dataset):
-    """
-    Fits a model on data in a Dataset object.
-    Parameters
-    ----------
-    dataset: Dataset
-      the Dataset to train on
-    """
-    raise NotImplementedError(
-        "Each model is responsible for its own fit method.")
-
-  def predict(self, dataset: Dataset,
-              transformers: List[Transformer] = []) -> np.ndarray:
-    """
-    Uses self to make predictions on provided Dataset object.
-    Parameters
-    ----------
-    dataset: Dataset
-      Dataset to make prediction on
-    transformers: List[Transformer]
-      Transformers that the input data has been transformed by. The output
-      is passed through these transformers to undo the transformations.
-    Returns
-    -------
-    np.ndarray
-      A numpy array of predictions the model produces.
-    """
-    y_preds = []
-    for (X_batch, _, _, ids_batch) in dataset.iterbatches(deterministic=True):
-      n_samples = len(X_batch)
-      y_pred_batch = self.predict_on_batch(X_batch)
-      # Discard any padded predictions
-      y_pred_batch = y_pred_batch[:n_samples]
-      y_pred_batch = undo_transforms(y_pred_batch, transformers)
-      y_preds.append(y_pred_batch)
-    y_pred = np.concatenate(y_preds)
-    return y_pred
-
-  def evaluate(self,
-               dataset: Dataset,
-               metrics: List[Metric],
-               transformers: List[Transformer] = [],
-               per_task_metrics: bool = False,
-               use_sample_weights: bool = False,
-               n_classes: int = 2):
-    """
-    Evaluates the performance of this model on specified dataset.
-    This function uses `Evaluator` under the hood to perform model
-    evaluation. As a result, it inherits the same limitations of
-    `Evaluator`. Namely, that only regression and classification
-    models can be evaluated in this fashion. For generator models, you
-    will need to overwrite this method to perform a custom evaluation.
-    Keyword arguments specified here will be passed to
-    `Evaluator.compute_model_performance`.
-    Parameters
-    ----------
-    dataset: Dataset
-      Dataset object.
-    metrics: Metric / List[Metric] / function
-      The set of metrics provided. This class attempts to do some
-      intelligent handling of input. If a single `dc.metrics.Metric`
-      object is provided or a list is provided, it will evaluate
-      `self.model` on these metrics. If a function is provided, it is
-      assumed to be a metric function that this method will attempt to
-      wrap in a `dc.metrics.Metric` object. A metric function must
-      accept two arguments, `y_true, y_pred` both of which are
-      `np.ndarray` objects and return a floating point score. The
-      metric function may also accept a keyword argument
-      `sample_weight` to account for per-sample weights.
-    transformers: List[Transformer]
-      List of `dc.trans.Transformer` objects. These transformations
-      must have been applied to `dataset` previously. The dataset will
-      be untransformed for metric evaluation.
-    per_task_metrics: bool, optional (default False)
-      If true, return computed metric for each task on multitask dataset.
-    use_sample_weights: bool, optional (default False)
-      If set, use per-sample weights `w`.
-    n_classes: int, optional (default None)
-      If specified, will use `n_classes` as the number of unique classes
-      in `self.dataset`. Note that this argument will be ignored for
-      regression metrics.
-    Returns
-    -------
-    multitask_scores: dict
-      Dictionary mapping names of metrics to metric scores.
-    all_task_scores: dict, optional
-      If `per_task_metrics == True` is passed as a keyword argument,
-      then returns a second dictionary of scores for each task
-      separately.
-    """
-    evaluator = Evaluator(self, dataset, transformers)
-    return evaluator.compute_model_performance(
-        metrics,
-        per_task_metrics=per_task_metrics,
-        use_sample_weights=use_sample_weights,
-        n_classes=n_classes)
-
-  def get_task_type(self) -> str:
-    """
-    Currently models can only be classifiers or regressors.
-    """
-    raise NotImplementedError
-
-  def get_num_tasks(self) -> int:
-    """
-    Get number of tasks.
-    """
-    raise NotImplementedError
-
-
-class TorchModel(Model):
-  """This is a DeepChem model implemented by a PyTorch model.
-  Here is a simple example of code that uses TorchModel to train
-  a PyTorch model on a DeepChem dataset.
-  >>> import torch
-  >>> import deepchem as dc
-  >>> import numpy as np
-  >>> X, y = np.random.random((10, 100)), np.random.random((10, 1))
-  >>> dataset = dc.data.NumpyDataset(X=X, y=y)
-  >>> pytorch_model = torch.nn.Sequential(
-  ...   torch.nn.Linear(100, 1000),
-  ...   torch.nn.Tanh(),
-  ...   torch.nn.Linear(1000, 1))
-  >>> model = dc.models.TorchModel(pytorch_model, loss=dc.models.losses.L2Loss())
-  >>> loss = model.fit(dataset, nb_epoch=5)
+class KerasModel(Model):
+  """This is a DeepChem model implemented by a Keras model.
+  This class provides several advantages over using the Keras
+  model's fitting and prediction methods directly.
+  1. It provides better integration with the rest of DeepChem,
+     such as direct support for Datasets and Transformers.
+  2. It defines the loss in a more flexible way.  In particular,
+     Keras does not support multidimensional weight matrices,
+     which makes it impossible to implement most multitask
+     models with Keras.
+  3. It provides various additional features not found in the
+     Keras model class, such as uncertainty prediction and
+     saliency mapping.
+  Here is a simple example of code that uses KerasModel to train
+  a Keras model on a DeepChem dataset.
+  >> keras_model = tf.keras.Sequential([
+  >>    tf.keras.layers.Dense(1000, activation='tanh'),
+  >>    tf.keras.layers.Dense(1)
+  >> ])
+  >> model = KerasModel(keras_model, loss=dc.models.losses.L2Loss())
+  >> model.fit(dataset)
   The loss function for a model can be defined in two different
   ways.  For models that have only a single output and use a
   standard loss function, you can simply provide a
   dc.models.losses.Loss object.  This defines the loss for each
   sample or sample/task pair.  The result is automatically
-  multiplied by the weights and averaged over the batch.
+  multiplied by the weights and averaged over the batch.  Any
+  additional losses computed by model layers, such as weight
+  decay penalties, are also added.
   For more complicated cases, you can instead provide a function
   that directly computes the total loss.  It must be of the form
   f(outputs, labels, weights), taking the list of outputs from
@@ -347,7 +112,7 @@ class TorchModel(Model):
   """
 
   def __init__(self,
-               model: torch.nn.Module,
+               model: tf.keras.Model,
                loss: Union[Loss, LossFn],
                output_types: Optional[List[str]] = None,
                batch_size: int = 100,
@@ -357,36 +122,34 @@ class TorchModel(Model):
                tensorboard: bool = False,
                wandb: bool = False,
                log_frequency: int = 100,
-               device: Optional[torch.device] = None,
-               regularization_loss: Optional[Callable] = None,
                wandb_logger: Optional[WandbLogger] = None,
                **kwargs) -> None:
-    """Create a new TorchModel.
+    """Create a new KerasModel.
     Parameters
     ----------
-    model: torch.nn.Module
-      the PyTorch model implementing the calculation
+    model: tf.keras.Model
+      the Keras model implementing the calculation
     loss: dc.models.losses.Loss or function
       a Loss or function defining how to compute the training loss for each
       batch, as described above
-    output_types: list of strings, optional (default None)
+    output_types: list of strings
       the type of each output from the model, as described above
-    batch_size: int, optional (default 100)
+    batch_size: int
       default batch size for training and evaluating
-    model_dir: str, optional (default None)
+    model_dir: str
       the directory on disk where the model will be stored.  If this is None,
       a temporary directory is created.
-    learning_rate: float or LearningRateSchedule, optional (default 0.001)
+    learning_rate: float or LearningRateSchedule
       the learning rate to use for fitting.  If optimizer is specified, this is
       ignored.
-    optimizer: Optimizer, optional (default None)
+    optimizer: Optimizer
       the optimizer to use for fitting.  If this is specified, learning_rate is
       ignored.
-    tensorboard: bool, optional (default False)
+    tensorboard: bool
       whether to log progress to TensorBoard during training
-    wandb: bool, optional (default False)
-      whether to log progress to Weights & Biases during training
-    log_frequency: int, optional (default 100)
+    wandb: bool
+      whether to log progress to Weights & Biases during training (deprecated)
+    log_frequency: int
       The frequency at which to log data. Data is logged using
       `logging` by default. If `tensorboard` is set, data is also
       logged to TensorBoard. If `wandb` is set, data is also logged
@@ -394,21 +157,15 @@ class TorchModel(Model):
       a global step corresponds to one batch of training. If you'd
       like a printout every 10 batch steps, you'd set
       `log_frequency=10` for example.
-    device: torch.device, optional (default None)
-      the device on which to run computations.  If None, a device is
-      chosen automatically.
-    regularization_loss: Callable, optional
-      a function that takes no arguments, and returns an extra contribution to add
-      to the loss function
     wandb_logger: WandbLogger
       the Weights & Biases logger object used to log data and metrics
     """
-    super(TorchModel, self).__init__(model=model, model_dir=model_dir, **kwargs)
+    super(KerasModel, self).__init__(model=model, model_dir=model_dir, **kwargs)
     self.loss = loss  # not used
     self.learning_rate = learning_rate  # not used
     self.output_types = output_types  # not used
     if isinstance(loss, Loss):
-      self._loss_fn: LossFn = _StandardLoss(self, loss)
+      self._loss_fn: LossFn = _StandardLoss(model, loss)
     else:
       self._loss_fn = loss
     self.batch_size = batch_size
@@ -417,19 +174,8 @@ class TorchModel(Model):
     else:
       self.optimizer = optimizer
     self.tensorboard = tensorboard
-    self.regularization_loss = regularization_loss
 
-    # Select a device.
-
-    if device is None:
-      if torch.cuda.is_available():
-        device = torch.device('cuda')
-      else:
-        device = torch.device('cpu')
-    self.device = device
-    self.model = model.to(device)
-
-    # W&B logging
+    # W&B flag support (DEPRECATED)
     if wandb:
       logger.warning(
           "`wandb` argument is deprecated. Please use `wandb_logger` instead. "
@@ -437,8 +183,7 @@ class TorchModel(Model):
     if wandb and not _has_wandb:
       logger.warning(
           "You set wandb to True but W&B is not installed. To use wandb logging, "
-          "run `pip install wandb; wandb login` see https://docs.wandb.com/huggingface."
-      )
+          "run `pip install wandb; wandb login`")
     self.wandb = wandb and _has_wandb
 
     self.wandb_logger = wandb_logger
@@ -459,19 +204,22 @@ class TorchModel(Model):
         learning_rate=learning_rate,
         optimizer=optimizer,
         tensorboard=tensorboard,
-        log_frequency=log_frequency,
-        regularization_loss=regularization_loss)
+        log_frequency=log_frequency)
     wandb_logger_config.update(**kwargs)
 
     if self.wandb_logger is not None:
       self.wandb_logger.update_config(wandb_logger_config)
 
-    self.log_frequency = log_frequency
-    if self.tensorboard and not _has_tensorboard:
-      raise ImportError("This class requires tensorboard to be installed.")
+    # Backwards compatibility
+    if "tensorboard_log_frequency" in kwargs:
+      logger.warning(
+          "tensorboard_log_frequency is deprecated. Please use log_frequency instead. This argument will be removed in a future release of DeepChem."
+      )
+      self.log_frequency = kwargs["tensorboard_log_frequency"]
+    else:
+      self.log_frequency = log_frequency
     if self.tensorboard:
-      self._summary_writer = torch.utils.tensorboard.SummaryWriter(
-          self.model_dir)
+      self._summary_writer = tf.summary.create_file_writer(self.model_dir)
     if output_types is None:
       self._prediction_outputs = None
       self._loss_outputs = None
@@ -494,22 +242,52 @@ class TorchModel(Model):
       if len(self._loss_outputs) == 0:
         self._loss_outputs = self._prediction_outputs
     self._built = False
+    self._inputs_built = False
+    self._training_ops_built = False
     self._output_functions: Dict[Any, Any] = {}
-    self._optimizer_for_vars: Dict[Any, Any] = {}
+    self._gradient_fn_for_vars: Dict[Any, Any] = {}
 
   def _ensure_built(self) -> None:
     """The first time this is called, create internal data structures."""
     if self._built:
       return
     self._built = True
-    self._global_step = 0
-    self._pytorch_optimizer = self.optimizer._create_pytorch_optimizer(
-        self.model.parameters())
-    if isinstance(self.optimizer.learning_rate, LearningRateSchedule):
-      self._lr_schedule = self.optimizer.learning_rate._create_pytorch_schedule(
-          self._pytorch_optimizer)
+    self._global_step = tf.Variable(0, trainable=False)
+    self._tf_optimizer = self.optimizer._create_tf_optimizer(self._global_step)
+    self._checkpoint = tf.train.Checkpoint(
+        optimizer=self._tf_optimizer, model=self.model)
+
+  def _create_inputs(self, example_inputs: List) -> None:
+    """The first time this is called, create tensors representing the inputs and outputs."""
+    if self._inputs_built:
+      return
+    self._ensure_built()
+    self._inputs_built = True
+    if (self.model.inputs is not None) and len(self.model.inputs) > 0:
+      self._input_shapes = [t.shape for t in self.model.inputs]
+      self._input_dtypes = [t.dtype.as_numpy_dtype for t in self.model.inputs]
     else:
-      self._lr_schedule = None
+      self._input_shapes = [(None,) + i.shape[1:] for i in example_inputs]
+      self._input_dtypes = [
+          np.float32 if x.dtype == np.float64 else x.dtype
+          for x in example_inputs
+      ]
+
+  def _create_training_ops(self,
+                           example_batch: Tuple[List, List, List]) -> None:
+    """The first time this is called, create tensors used in optimization."""
+    if self._training_ops_built:
+      return
+    self._create_inputs(example_batch[0])
+    self._training_ops_built = True
+    self._label_dtypes = [
+        np.float32 if x.dtype == np.float64 else x.dtype
+        for x in example_batch[1]
+    ]
+    self._weights_dtypes = [
+        np.float32 if x.dtype == np.float64 else x.dtype
+        for x in example_batch[2]
+    ]
 
   def fit(self,
           dataset: Dataset,
@@ -518,7 +296,7 @@ class TorchModel(Model):
           checkpoint_interval: int = 1000,
           deterministic: bool = False,
           restore: bool = False,
-          variables: Optional[List[torch.nn.Parameter]] = None,
+          variables: Optional[List[tf.Variable]] = None,
           loss: Optional[LossFn] = None,
           callbacks: Union[Callable, List[Callable]] = [],
           all_losses: Optional[List[float]] = None) -> float:
@@ -540,7 +318,7 @@ class TorchModel(Model):
     restore: bool
       if True, restore the model from the most recent checkpoint and continue training
       from there.  If False, retrain the model from scratch.
-    variables: list of torch.nn.Parameter
+    variables: list of tf.Variable
       the variables to train.  If None (the default), all trainable variables in
       the model are used.
     loss: function
@@ -569,7 +347,7 @@ class TorchModel(Model):
                     max_checkpoints_to_keep: int = 5,
                     checkpoint_interval: int = 1000,
                     restore: bool = False,
-                    variables: Optional[List[torch.nn.Parameter]] = None,
+                    variables: Optional[List[tf.Variable]] = None,
                     loss: Optional[LossFn] = None,
                     callbacks: Union[Callable, List[Callable]] = [],
                     all_losses: Optional[List[float]] = None) -> float:
@@ -587,7 +365,7 @@ class TorchModel(Model):
     restore: bool
       if True, restore the model from the most recent checkpoint and continue training
       from there.  If False, retrain the model from scratch.
-    variables: list of torch.nn.Parameter
+    variables: list of tf.Variable
       the variables to train.  If None (the default), all trainable variables in
       the model are used.
     loss: function
@@ -608,56 +386,45 @@ class TorchModel(Model):
     if not isinstance(callbacks, SequenceCollection):
       callbacks = [callbacks]
     self._ensure_built()
-    self.model.train()
+    if checkpoint_interval > 0:
+      manager = tf.train.CheckpointManager(self._checkpoint, self.model_dir,
+                                           max_checkpoints_to_keep)
     avg_loss = 0.0
     last_avg_loss = 0.0
     averaged_batches = 0
     if loss is None:
       loss = self._loss_fn
-    if variables is None:
-      optimizer = self._pytorch_optimizer
-      lr_schedule = self._lr_schedule
-    else:
-      var_key = tuple(variables)
-      if var_key in self._optimizer_for_vars:
-        optimizer, lr_schedule = self._optimizer_for_vars[var_key]
-      else:
-        optimizer = self.optimizer._create_pytorch_optimizer(variables)
-        if isinstance(self.optimizer.learning_rate, LearningRateSchedule):
-          lr_schedule = self.optimizer.learning_rate._create_pytorch_schedule(
-              optimizer)
-        else:
-          lr_schedule = None
-        self._optimizer_for_vars[var_key] = (optimizer, lr_schedule)
+    var_key = None
+    if variables is not None:
+      var_key = tuple(v.ref() for v in variables)
+
+      # The optimizer creates internal variables the first time apply_gradients()
+      # is called for a new set of variables.  If that happens inside a function
+      # annotated with tf.function it throws an exception, so call it once here.
+
+      zero_grads = [tf.zeros(v.shape) for v in variables]
+      self._tf_optimizer.apply_gradients(zip(zero_grads, variables))
+    if var_key not in self._gradient_fn_for_vars:
+      self._gradient_fn_for_vars[var_key] = self._create_gradient_fn(variables)
+    apply_gradient_for_batch = self._gradient_fn_for_vars[var_key]
     time1 = time.time()
 
     # Main training loop.
 
     for batch in generator:
+      self._create_training_ops(batch)
       if restore:
         self.restore()
         restore = False
-      inputs: OneOrMany[torch.Tensor]
       inputs, labels, weights = self._prepare_batch(batch)
 
       # Execute the loss function, accumulating the gradients.
 
-      if isinstance(inputs, list) and len(inputs) == 1:
+      if len(inputs) == 1:
         inputs = inputs[0]
 
-      optimizer.zero_grad()
-      outputs = self.model(inputs)
-      if isinstance(outputs, torch.Tensor):
-        outputs = [outputs]
-      if self._loss_outputs is not None:
-        outputs = [outputs[i] for i in self._loss_outputs]
-      batch_loss = loss(outputs, labels, weights)
-      batch_loss.backward()
-      optimizer.step()
-      if lr_schedule is not None:
-        lr_schedule.step()
-      self._global_step += 1
-      current_step = self._global_step
+      batch_loss = apply_gradient_for_batch(inputs, labels, weights, loss)
+      current_step = self._global_step.numpy()
 
       avg_loss += batch_loss
 
@@ -670,13 +437,14 @@ class TorchModel(Model):
             'Ending global_step %d: Average loss %g' % (current_step, avg_loss))
         if all_losses is not None:
           all_losses.append(avg_loss)
-        # Capture the last avg_loss in case of return since we're resetting to 0 now
+        # Capture the last avg_loss in case of return since we're resetting to
+        # 0 now
         last_avg_loss = avg_loss
         avg_loss = 0.0
         averaged_batches = 0
 
       if checkpoint_interval > 0 and current_step % checkpoint_interval == checkpoint_interval - 1:
-        self.save_checkpoint(max_checkpoints_to_keep)
+        manager.save()
       for c in callbacks:
         c(self, current_step)
       if self.tensorboard and should_log:
@@ -695,17 +463,44 @@ class TorchModel(Model):
       last_avg_loss = avg_loss
 
     if checkpoint_interval > 0:
-      self.save_checkpoint(max_checkpoints_to_keep)
+      manager.save()
 
     time2 = time.time()
     logger.info("TIMING: model fitting took %0.3f s" % (time2 - time1))
     return last_avg_loss
 
+  def _create_gradient_fn(self,
+                          variables: Optional[List[tf.Variable]]) -> Callable:
+    """Create a function that computes gradients and applies them to the model.
+    Because of the way TensorFlow function tracing works, we need to create a
+    separate function for each new set of variables.
+    """
+
+    @tf.function(experimental_relax_shapes=True)
+    def apply_gradient_for_batch(inputs, labels, weights, loss):
+      with tf.GradientTape() as tape:
+        outputs = self.model(inputs, training=True)
+        if tf.is_tensor(outputs):
+          outputs = [outputs]
+        if self._loss_outputs is not None:
+          outputs = [outputs[i] for i in self._loss_outputs]
+        batch_loss = loss(outputs, labels, weights)
+      if variables is None:
+        vars = self.model.trainable_variables
+      else:
+        vars = variables
+      grads = tape.gradient(batch_loss, vars)
+      self._tf_optimizer.apply_gradients(zip(grads, vars))
+      self._global_step.assign_add(1)
+      return batch_loss
+
+    return apply_gradient_for_batch
+
   def fit_on_batch(self,
                    X: Sequence,
                    y: Sequence,
                    w: Sequence,
-                   variables: Optional[List[torch.nn.Parameter]] = None,
+                   variables: Optional[List[tf.Variable]] = None,
                    loss: Optional[LossFn] = None,
                    callbacks: Union[Callable, List[Callable]] = [],
                    checkpoint: bool = True,
@@ -719,7 +514,7 @@ class TorchModel(Model):
       the labels for the batch
     w: ndarray
       the weights for the batch
-    variables: list of torch.nn.Parameter
+    variables: list of tf.Variable
       the variables to train.  If None (the default), all trainable variables in
       the model are used.
     loss: function
@@ -743,14 +538,15 @@ class TorchModel(Model):
         dataset,
         nb_epoch=1,
         max_checkpoints_to_keep=max_checkpoints_to_keep,
-        checkpoint_interval=self._global_step + 2 if checkpoint else 0,
+        checkpoint_interval=self._global_step.numpy() + 2 if checkpoint else 0,
         variables=variables,
         loss=loss,
         callbacks=callbacks)
 
   def _predict(
       self, generator: Iterable[Tuple[Any, Any, Any]],
-      transformers: List[Transformer], uncertainty: bool,
+      transformers: List[Transformer], outputs: Optional[OneOrMany[tf.Tensor]],
+      uncertainty: bool,
       other_output_types: Optional[OneOrMany[str]]) -> OneOrMany[np.ndarray]:
     """
     Predict outputs for data provided by a generator.
@@ -765,46 +561,73 @@ class TorchModel(Model):
     transformers: list of dc.trans.Transformers
       Transformers that the input data has been transformed by.  The output
       is passed through these transformers to undo the transformations.
+    outputs: Tensor or list of Tensors
+      The outputs to return.  If this is None, the model's standard prediction
+      outputs will be returned.  Alternatively one or more Tensors within the
+      model may be specified, in which case the output of those Tensors will be
+      returned.
     uncertainty: bool
       specifies whether this is being called as part of estimating uncertainty.
       If True, it sets the training flag so that dropout will be enabled, and
       returns the values of the uncertainty outputs.
     other_output_types: list, optional
       Provides a list of other output_types (strings) to predict from model.
-    Returns:
-      a NumPy array of the model produces a single output, or a list of arrays
-      if it produces multiple outputs
+    Returns
+    -------
+    a NumPy array of the model produces a single output, or a list of arrays
+    if it produces multiple outputs
     """
     results: Optional[List[List[np.ndarray]]] = None
     variances: Optional[List[List[np.ndarray]]] = None
+    if (outputs is not None) and (other_output_types is not None):
+      raise ValueError(
+          'This model cannot compute outputs and other output_types simultaneously.'
+          'Please invoke one at a time.')
     if uncertainty and (other_output_types is not None):
       raise ValueError(
-          'This model cannot compute uncertainties and other output types simultaneously. Please invoke one at a time.'
-      )
+          'This model cannot compute uncertainties and other output types simultaneously.'
+          'Please invoke one at a time.')
     if uncertainty:
+      assert outputs is None
       if self._variance_outputs is None or len(self._variance_outputs) == 0:
         raise ValueError('This model cannot compute uncertainties')
       if len(self._variance_outputs) != len(self._prediction_outputs):
         raise ValueError(
             'The number of variances must exactly match the number of outputs')
     if other_output_types:
+      assert outputs is None
       if self._other_outputs is None or len(self._other_outputs) == 0:
         raise ValueError(
             'This model cannot compute other outputs since no other output_types were specified.'
         )
-    self._ensure_built()
-    self.model.eval()
+    if (outputs is not None and self.model.inputs is not None and
+        len(self.model.inputs) == 0):
+      raise ValueError(
+          "Cannot use 'outputs' argument with a model that does not specify its inputs."
+          "Note models defined in imperative subclassing style cannot specify outputs"
+      )
+    if tf.is_tensor(outputs):
+      outputs = [outputs]
     for batch in generator:
       inputs, labels, weights = batch
+      self._create_inputs(inputs)
       inputs, _, _ = self._prepare_batch((inputs, None, None))
 
       # Invoke the model.
-      if isinstance(inputs, list) and len(inputs) == 1:
+      if len(inputs) == 1:
         inputs = inputs[0]
-      output_values = self.model(inputs)
-      if isinstance(output_values, torch.Tensor):
-        output_values = [output_values]
-      output_values = [t.detach().cpu().numpy() for t in output_values]
+      if outputs is not None:
+        outputs = tuple(outputs)
+        key = tuple(t.ref() for t in outputs)
+        if key not in self._output_functions:
+          self._output_functions[key] = tf.keras.backend.function(
+              self.model.inputs, outputs)
+        output_values = self._output_functions[key](inputs)
+      else:
+        output_values = self._compute_model(inputs)
+        if tf.is_tensor(output_values):
+          output_values = [output_values]
+        output_values = [t.numpy() for t in output_values]
 
       # Apply tranformers and record results.
       if uncertainty:
@@ -850,10 +673,16 @@ class TorchModel(Model):
     else:
       return final_results
 
+  @tf.function(experimental_relax_shapes=True)
+  def _compute_model(self, inputs: Sequence):
+    """Evaluate the model for a set of inputs."""
+    return self.model(inputs, training=False)
+
   def predict_on_generator(
       self,
       generator: Iterable[Tuple[Any, Any, Any]],
       transformers: List[Transformer] = [],
+      outputs: Optional[OneOrMany[tf.Tensor]] = None,
       output_types: Optional[OneOrMany[str]] = None) -> OneOrMany[np.ndarray]:
     """
     Parameters
@@ -864,6 +693,13 @@ class TorchModel(Model):
     transformers: list of dc.trans.Transformers
       Transformers that the input data has been transformed by.  The output
       is passed through these transformers to undo the transformations.
+    outputs: Tensor or list of Tensors
+      The outputs to return.  If this is None, the model's
+      standard prediction outputs will be returned.
+      Alternatively one or more Tensors within the model may be
+      specified, in which case the output of those Tensors will
+      be returned. If outputs is specified, output_types must be
+      None.
     output_types: String or list of Strings
       If specified, all outputs of this type will be retrieved
       from the model. If output_types is specified, outputs must
@@ -872,10 +708,13 @@ class TorchModel(Model):
       a NumPy array of the model produces a single output, or a list of arrays
       if it produces multiple outputs
     """
-    return self._predict(generator, transformers, False, output_types)
+    return self._predict(generator, transformers, outputs, False, output_types)
 
-  def predict_on_batch(self, X: ArrayLike, transformers: List[Transformer] = []
-                      ) -> OneOrMany[np.ndarray]:
+  def predict_on_batch(
+      self,
+      X: ArrayLike,
+      transformers: List[Transformer] = [],
+      outputs: Optional[OneOrMany[tf.Tensor]] = None) -> OneOrMany[np.ndarray]:
     """Generates predictions for input samples, processing samples in a batch.
     Parameters
     ----------
@@ -884,13 +723,18 @@ class TorchModel(Model):
     transformers: list of dc.trans.Transformers
       Transformers that the input data has been transformed by.  The output
       is passed through these transformers to undo the transformations.
+    outputs: Tensor or list of Tensors
+      The outputs to return.  If this is None, the model's standard prediction
+      outputs will be returned.  Alternatively one or more Tensors within the
+      model may be specified, in which case the output of those Tensors will be
+      returned.
     Returns
     -------
     a NumPy array of the model produces a single output, or a list of arrays
     if it produces multiple outputs
     """
     dataset = NumpyDataset(X=X, y=None)
-    return self.predict(dataset, transformers)
+    return self.predict(dataset, transformers, outputs)
 
   def predict_uncertainty_on_batch(self, X: Sequence, masks: int = 50
                                   ) -> OneOrMany[Tuple[np.ndarray, np.ndarray]]:
@@ -921,6 +765,7 @@ class TorchModel(Model):
       self,
       dataset: Dataset,
       transformers: List[Transformer] = [],
+      outputs: Optional[OneOrMany[tf.Tensor]] = None,
       output_types: Optional[List[str]] = None) -> OneOrMany[np.ndarray]:
     """
     Uses self to make predictions on provided Dataset object.
@@ -931,6 +776,11 @@ class TorchModel(Model):
     transformers: list of dc.trans.Transformers
       Transformers that the input data has been transformed by.  The output
       is passed through these transformers to undo the transformations.
+    outputs: Tensor or list of Tensors
+      The outputs to return.  If this is None, the model's standard prediction
+      outputs will be returned.  Alternatively one or more Tensors within the
+      model may be specified, in which case the output of those Tensors will be
+      returned.
     output_types: String or list of Strings
       If specified, all outputs of this type will be retrieved
       from the model. If output_types is specified, outputs must
@@ -941,9 +791,12 @@ class TorchModel(Model):
     if it produces multiple outputs
     """
     generator = self.default_generator(
-        dataset, mode='predict', pad_batches=False)
+        dataset, mode='predict', deterministic=True, pad_batches=False)
     return self.predict_on_generator(
-        generator, transformers=transformers, output_types=output_types)
+        generator,
+        transformers=transformers,
+        outputs=outputs,
+        output_types=output_types)
 
   def predict_embedding(self, dataset: Dataset) -> OneOrMany[np.ndarray]:
     """
@@ -961,7 +814,7 @@ class TorchModel(Model):
     """
     generator = self.default_generator(
         dataset, mode='predict', pad_batches=False)
-    return self._predict(generator, [], False, ['embedding'])
+    return self._predict(generator, [], None, False, ['embedding'])
 
   def predict_uncertainty(self, dataset: Dataset, masks: int = 50
                          ) -> OneOrMany[Tuple[np.ndarray, np.ndarray]]:
@@ -991,7 +844,7 @@ class TorchModel(Model):
     for i in range(masks):
       generator = self.default_generator(
           dataset, mode='uncertainty', pad_batches=False)
-      results = self._predict(generator, [], True, None)
+      results = self._predict(generator, [], None, True, None)
       if len(sum_pred) == 0:
         for p, v in results:
           sum_pred.append(p)
@@ -1058,59 +911,57 @@ class TorchModel(Model):
     """
     input_shape = X.shape
     X = np.reshape(X, [1] + list(X.shape))
-    self._ensure_built()
-    X_batch, _, _ = self._prepare_batch(([X], None, None))
+    self._create_inputs([X])
+    X, _, _ = self._prepare_batch(([X], None, None))
 
-    # Compute the gradients.
+    # Use a GradientTape to compute gradients.
 
-    X_tensor = X_batch[0]
-    X_tensor.requires_grad_(True)
-    outputs = self.model(X_tensor)
-    if isinstance(outputs, torch.Tensor):
-      outputs = [outputs]
-    final_result = []
-    for output in outputs:
-      output_shape = tuple(output.shape[1:])
-      output = output.reshape([-1])
-      result = []
-      grad_output = torch.zeros(output.shape[0], device=self.device)
-      for i in range(output.shape[0]):
-        grad_output.zero_()
-        grad_output[i] = 1
-        output.backward(grad_output, retain_graph=True)
-        result.append(X_tensor.grad.clone())
-        X_tensor.grad.zero_()
-      final_result.append(
-          torch.reshape(torch.stack(result),
-                        output_shape + input_shape).cpu().numpy())
+    X = tf.constant(X[0])
+    with tf.GradientTape(
+        persistent=True, watch_accessed_variables=False) as tape:
+      tape.watch(X)
+      outputs = self._compute_model(X)
+      if tf.is_tensor(outputs):
+        outputs = [outputs]
+      final_result = []
+      for output in outputs:
+        output_shape = tuple(output.shape.as_list()[1:])
+        output = tf.reshape(output, [-1])
+        result = []
+        for i in range(output.shape[0]):
+          result.append(tape.gradient(output[i], X))
+        final_result.append(
+            tf.reshape(tf.stack(result), output_shape + input_shape).numpy())
     if len(final_result) == 1:
       return final_result[0]
     return final_result
 
-  def _prepare_batch(
-      self, batch: Tuple[Any, Any, Any]
-  ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
+  def _prepare_batch(self,
+                     batch: Tuple[Any, Any, Any]) -> Tuple[List, List, List]:
     inputs, labels, weights = batch
     inputs = [
-        x.astype(np.float32) if x.dtype == np.float64 else x for x in inputs
+        x if x.dtype == t else x.astype(t)
+        for x, t in zip(inputs, self._input_dtypes)
     ]
-    input_tensors = [torch.as_tensor(x, device=self.device) for x in inputs]
     if labels is not None:
       labels = [
-          x.astype(np.float32) if x.dtype == np.float64 else x for x in labels
+          x if x.dtype == t else x.astype(t)
+          for x, t in zip(labels, self._label_dtypes)
       ]
-      label_tensors = [torch.as_tensor(x, device=self.device) for x in labels]
-    else:
-      label_tensors = []
     if weights is not None:
       weights = [
-          x.astype(np.float32) if x.dtype == np.float64 else x for x in weights
+          x if x.dtype == t else x.astype(t)
+          for x, t in zip(weights, self._weights_dtypes)
       ]
-      weight_tensors = [torch.as_tensor(x, device=self.device) for x in weights]
-    else:
-      weight_tensors = []
-
-    return (input_tensors, label_tensors, weight_tensors)
+    for i in range(len(inputs)):
+      shape = inputs[i].shape
+      dims = len(shape)
+      expected_dims = len(self._input_shapes[i])
+      if dims < expected_dims:
+        inputs[i] = inputs[i].reshape(shape + (1,) * (expected_dims - dims))
+      elif dims > expected_dims and all(d == 1 for d in shape[expected_dims:]):
+        inputs[i] = inputs[i].reshape(shape[:expected_dims])
+    return (inputs, labels, weights)
 
   def default_generator(
       self,
@@ -1168,29 +1019,9 @@ class TorchModel(Model):
       model_dir = self.model_dir
     if not os.path.exists(model_dir):
       os.makedirs(model_dir)
-
-    # Save the checkpoint to a file.
-
-    data = {
-        'model_state_dict': self.model.state_dict(),
-        'optimizer_state_dict': self._pytorch_optimizer.state_dict(),
-        'global_step': self._global_step
-    }
-    temp_file = os.path.join(model_dir, 'temp_checkpoint.pt')
-    torch.save(data, temp_file)
-
-    # Rename and delete older files.
-
-    paths = [
-        os.path.join(model_dir, 'checkpoint%d.pt' % (i + 1))
-        for i in range(max_checkpoints_to_keep)
-    ]
-    if os.path.exists(paths[-1]):
-      os.remove(paths[-1])
-    for i in reversed(range(max_checkpoints_to_keep - 1)):
-      if os.path.exists(paths[i]):
-        os.rename(paths[i], paths[i + 1])
-    os.rename(temp_file, paths[0])
+    manager = tf.train.CheckpointManager(self._checkpoint, model_dir,
+                                         max_checkpoints_to_keep)
+    manager.save()
 
   def get_checkpoints(self, model_dir: Optional[str] = None):
     """Get a list of all available checkpoint files.
@@ -1201,11 +1032,7 @@ class TorchModel(Model):
     """
     if model_dir is None:
       model_dir = self.model_dir
-    files = sorted(os.listdir(model_dir))
-    files = [
-        f for f in files if f.startswith('checkpoint') and f.endswith('.pt')
-    ]
-    return [os.path.join(model_dir, f) for f in files]
+    return tf.train.get_checkpoint_state(model_dir).all_model_checkpoint_paths
 
   def restore(self,
               checkpoint: Optional[str] = None,
@@ -1218,34 +1045,32 @@ class TorchModel(Model):
       checkpoint will be chosen automatically.  Call get_checkpoints() to get a
       list of all available checkpoints.
     model_dir: str, default None
-      Directory to restore checkpoint from. If None, use self.model_dir.  If
-      checkpoint is not None, this is ignored.
+      Directory to restore checkpoint from. If None, use self.model_dir.
     """
     self._ensure_built()
+    if model_dir is None:
+      model_dir = self.model_dir
     if checkpoint is None:
-      checkpoints = sorted(self.get_checkpoints(model_dir))
-      if len(checkpoints) == 0:
-        raise ValueError('No checkpoint found')
-      checkpoint = checkpoints[0]
-    data = torch.load(checkpoint)
-    self.model.load_state_dict(data['model_state_dict'])
-    self._pytorch_optimizer.load_state_dict(data['optimizer_state_dict'])
-    self._global_step = data['global_step']
+      checkpoint = tf.train.latest_checkpoint(model_dir)
+    if checkpoint is None:
+      raise ValueError('No checkpoint found')
+    self._checkpoint.restore(checkpoint)
 
   def get_global_step(self) -> int:
     """Get the number of steps of fitting that have been performed."""
-    return self._global_step
+    return int(self._global_step)
 
   def _log_scalar_to_tensorboard(self, name: str, value: Any, step: int):
     """Log a scalar value to Tensorboard."""
-    self._summary_writer.add_scalar(name, value, step)
+    with self._summary_writer.as_default():
+      tf.summary.scalar(name, value, step)
 
   def _create_assignment_map(self,
-                             source_model: "TorchModel",
+                             source_model: "KerasModel",
                              include_top: bool = True,
                              **kwargs) -> Dict[Any, Any]:
     """
-    Creates a default assignment map between parameters of source and current model.
+    Creates a default assignment map between variables of source and current model.
     This is used only when a custom assignment map is missing. This assumes the
     model is made of different layers followed by a dense layer for mapping to
     output tasks. include_top is used to control whether or not the final dense
@@ -1253,45 +1078,45 @@ class TorchModel(Model):
     of task is different (classification vs regression) and/or number of tasks.
     Parameters
     ----------
-    source_model: dc.models.TorchModel
-        Source model to copy parameter values from.
+    source_model: dc.models.KerasModel
+        Source model to copy variable values from.
     include_top: bool, default True
         if true, copies the last dense layer
     """
     assignment_map: Dict[Any, Any] = {}
-    source_vars = list(source_model.model.parameters())
-    dest_vars = list(self.model.parameters())
+    source_vars = source_model.model.trainable_variables
+    dest_vars = self.model.trainable_variables
 
     if not include_top:
       source_vars = source_vars[:-2]
       dest_vars = dest_vars[:-2]
 
     for source_var, dest_var in zip(source_vars, dest_vars):
-      assignment_map[source_var] = dest_var
+      assignment_map[source_var.ref()] = dest_var
 
     return assignment_map
 
-  def _create_value_map(self, source_model: "TorchModel",
+  def _create_value_map(self, source_model: "KerasModel",
                         **kwargs) -> Dict[Any, Any]:
     """
-    Creates a value map between parameters in the source model and their
+    Creates a value map between variables in the source model and their
     current values. This is used only when a custom value map is missing, and
-    assumes the restore method has been called.
+    assumes the restore method has been called under self.session.
     Parameters
     ----------
-    source_model: dc.models.TorchModel
+    source_model: dc.models.KerasModel
         Source model to create value map from
     """
     value_map: Dict[Any, Any] = {}
-    source_vars = list(source_model.model.parameters())
+    source_vars = source_model.model.trainable_variables
 
     for source_var in source_vars:
-      value_map[source_var] = source_var.detach().cpu().numpy()
+      value_map[source_var.ref()] = source_var.numpy()
 
     return value_map
 
   def load_from_pretrained(self,
-                           source_model: "TorchModel",
+                           source_model: "KerasModel",
                            assignment_map: Optional[Dict[Any, Any]] = None,
                            value_map: Optional[Dict[Any, Any]] = None,
                            checkpoint: Optional[str] = None,
@@ -1299,30 +1124,30 @@ class TorchModel(Model):
                            include_top: bool = True,
                            inputs: Optional[Sequence[Any]] = None,
                            **kwargs) -> None:
-    """Copies parameter values from a pretrained model. `source_model` can either
+    """Copies variable values from a pretrained model. `source_model` can either
     be a pretrained model or a model with the same architecture. `value_map`
-    is a parameter-value dictionary. If no `value_map` is provided, the parameter
+    is a variable-value dictionary. If no `value_map` is provided, the variable
     values are restored to the `source_model` from a checkpoint and a default
-    `value_map` is created. `assignment_map` is a dictionary mapping parameters
+    `value_map` is created. `assignment_map` is a dictionary mapping variables
     from the `source_model` to the current model. If no `assignment_map` is
     provided, one is made from scratch and assumes the model is composed of
-    several different layers, with the final one being a dense layer. include_top
+    several different layers, with the final one being a dense layer. `include_top`
     is used to control whether or not the final dense layer is used. The default
     assignment map is useful in cases where the type of task is different
     (classification vs regression) and/or number of tasks in the setting.
     Parameters
     ----------
-    source_model: dc.TorchModel, required
-      source_model can either be the pretrained model or a dc.TorchModel with
+    source_model: dc.KerasModel, required
+      source_model can either be the pretrained model or a dc.KerasModel with
       the same architecture as the pretrained model. It is used to restore from
       a checkpoint, if value_map is None and to create a default assignment map
       if assignment_map is None
     assignment_map: Dict, default None
-      Dictionary mapping the source_model parameters and current model parameters
+      Dictionary mapping the source_model variables and current model variables
     value_map: Dict, default None
-      Dictionary containing source_model trainable parameters mapped to numpy
+      Dictionary containing source_model trainable variables mapped to numpy
       arrays. If value_map is None, the values are restored and a default
-      parameter map is created using the restored values
+      variable map is created using the restored values
     checkpoint: str, default None
       the path to the checkpoint file to load.  If this is None, the most recent
       checkpoint will be chosen automatically.  Call get_checkpoints() to get a
@@ -1334,6 +1159,8 @@ class TorchModel(Model):
         layer. Used only when assignment map is None
     inputs: List, input tensors for model
         if not None, then the weights are built for both the source and self.
+        This option is useful only for models that are built by
+        subclassing tf.keras.Model, and not using the functional API by tf.keras
     """
     if inputs is not None:
       # Ensure weights for both models are built.
@@ -1354,175 +1181,31 @@ class TorchModel(Model):
           source_model=source_model, include_top=include_top)
 
     for source_var, dest_var in assignment_map.items():
-      assert source_var.shape == dest_var.shape
-      dest_var.data = torch.as_tensor(value_map[source_var], device=self.device)
+      assert source_var.deref().shape == dest_var.shape
+      dest_var.assign(value_map[source_var])
 
 
-def get_activation(fn: Union[Callable, str]):
-  """Get a PyTorch activation function, specified either directly or as a string.
-    This function simplifies allowing users to specify activation functions by name.
-    If a function is provided, it is simply returned unchanged.  If a string is provided,
-    the corresponding function in torch.nn.functional is returned.
-    """
-  if isinstance(fn, str):
-    return getattr(torch.nn.functional, fn)
-  return fn
+class _StandardLoss(object):
+  """The implements the loss function for models that use a dc.models.losses.Loss."""
 
+  def __init__(self, model: tf.keras.Model, loss: Loss) -> None:
+    self.model = model
+    self.loss = loss
 
-class MultitaskClassifier(TorchModel):
-  """A fully connected network for multitask classification.
-  This class provides lots of options for customizing aspects of the model: the
-  number and widths of layers, the activation functions, regularization methods,
-  etc.
-  It optionally can compose the model from pre-activation residual blocks, as
-  described in https://arxiv.org/abs/1603.05027, rather than a simple stack of
-  dense layers.  This often leads to easier training, especially when using a
-  large number of layers.  Note that residual blocks can only be used when
-  successive layers have the same width.  Wherever the layer width changes, a
-  simple dense layer will be used even if residual=True.
-  """
-
-  def __init__(self,
-               n_tasks: int,
-               n_features: int,
-               layer_sizes: Sequence[int] = [1000],
-               weight_init_stddevs: OneOrMany[float] = 0.02,
-               bias_init_consts: OneOrMany[float] = 1.0,
-               weight_decay_penalty: float = 0.0,
-               weight_decay_penalty_type: str = 'l2',
-               dropouts: OneOrMany[float] = 0.5,
-               activation_fns = 'relu',
-               n_classes: int = 2,
-               residual: bool = False,
-               **kwargs) -> None:
-    """Create a MultitaskClassifier.
-    In addition to the following arguments, this class also accepts
-    all the keyword arguments from TensorGraph.
-    Parameters
-    ----------
-    n_tasks: int
-      number of tasks
-    n_features: int
-      number of features
-    layer_sizes: list
-      the size of each dense layer in the network.  The length of
-      this list determines the number of layers.
-    weight_init_stddevs: list or float
-      the standard deviation of the distribution to use for weight
-      initialization of each layer.  The length of this list should
-      equal len(layer_sizes).  Alternatively this may be a single
-      value instead of a list, in which case the same value is used
-      for every layer.
-    bias_init_consts: list or float
-      the value to initialize the biases in each layer to.  The
-      length of this list should equal len(layer_sizes).
-      Alternatively this may be a single value instead of a list, in
-      which case the same value is used for every layer.
-    weight_decay_penalty: float
-      the magnitude of the weight decay penalty to use
-    weight_decay_penalty_type: str
-      the type of penalty to use for weight decay, either 'l1' or 'l2'
-    dropouts: list or float
-      the dropout probablity to use for each layer.  The length of this list should equal len(layer_sizes).
-      Alternatively this may be a single value instead of a list, in which case the same value is used for every layer.
-    activation_fns: list or object
-      the PyTorch activation function to apply to each layer.  The length of this list should equal
-      len(layer_sizes).  Alternatively this may be a single value instead of a list, in which case the
-      same value is used for every layer.  Standard activation functions from torch.nn.functional can be specified by name.
-    n_classes: int
-      the number of classes
-    residual: bool
-      if True, the model will be composed of pre-activation residual blocks instead
-      of a simple stack of dense layers.
-    """
-    self.n_tasks = n_tasks
-    self.n_features = n_features
-    self.n_classes = n_classes
-    n_layers = len(layer_sizes)
-    if not isinstance(weight_init_stddevs, SequenceCollection):
-      weight_init_stddevs = [weight_init_stddevs] * n_layers
-    if not isinstance(bias_init_consts, SequenceCollection):
-      bias_init_consts = [bias_init_consts] * n_layers
-    if not isinstance(dropouts, SequenceCollection):
-      dropouts = [dropouts] * n_layers
-    if isinstance(activation_fns,
-                  str) or not isinstance(activation_fns, SequenceCollection):
-      activation_fns = [activation_fns] * n_layers
-    activation_fns = [get_activation(f) for f in activation_fns]
-
-    # Define the PyTorch Module that implements the model.
-
-    class PytorchImpl(torch.nn.Module):
-
-      def __init__(self):
-        super(PytorchImpl, self).__init__()
-        self.layers = torch.nn.ModuleList()
-        prev_size = n_features
-        for size, weight_stddev, bias_const in zip(
-            layer_sizes, weight_init_stddevs, bias_init_consts):
-          layer = torch.nn.Linear(prev_size, size)
-          torch.nn.init.normal_(layer.weight, 0, weight_stddev)
-          torch.nn.init.constant_(layer.bias, bias_const)
-          self.layers.append(layer)
-          prev_size = size
-        self.output_layer = torch.nn.Linear(prev_size, n_tasks * n_classes)
-        torch.nn.init.xavier_uniform_(self.output_layer.weight)
-        torch.nn.init.constant_(self.output_layer.bias, 0)
-
-      def forward(self, x):
-        prev_size = n_features
-        next_activation = None
-        for size, layer, dropout, activation_fn, in zip(
-            layer_sizes, self.layers, dropouts, activation_fns):
-          y = x
-          if next_activation is not None:
-            y = next_activation(x)
-          y = layer(y)
-          if dropout > 0.0 and self.training:
-            y = F.dropout(y, dropout)
-          if residual and prev_size == size:
-            y = x + y
-          x = y
-          prev_size = size
-          next_activation = activation_fn
-        if next_activation is not None:
-          y = next_activation(y)
-        neural_fingerprint = y
-        y = self.output_layer(y)
-        logits = torch.reshape(y, (-1, n_tasks, n_classes))
-        output = F.softmax(logits, dim=2)
-        return (output, logits, neural_fingerprint)
-
-    model = PytorchImpl()
-    regularization_loss: Optional[Callable]
-    if weight_decay_penalty != 0:
-      weights = [layer.weight for layer in model.layers]
-      if weight_decay_penalty_type == 'l1':
-        regularization_loss = lambda: weight_decay_penalty * torch.sum(torch.stack([torch.abs(w).sum() for w in weights]))
+  def __call__(self, outputs: List, labels: List, weights: List) -> float:
+    if len(outputs) != 1 or len(labels) != 1 or len(weights) != 1:
+      raise ValueError(
+          "Loss functions expects exactly one each of outputs, labels, and weights"
+      )
+    losses = self.loss._compute_tf_loss(outputs[0], labels[0])
+    w = weights[0]
+    if len(w.shape) < len(losses.shape):
+      if tf.is_tensor(w):
+        shape = tuple(w.shape.as_list())
       else:
-        regularization_loss = lambda: weight_decay_penalty * torch.sum(torch.stack([torch.square(w).sum() for w in weights]))
-    else:
-      regularization_loss = None
-    super(MultitaskClassifier, self).__init__(
-        model,
-        SoftmaxCrossEntropy(),
-        output_types=['prediction', 'loss', 'embedding'],
-        regularization_loss=regularization_loss,
-        **kwargs)
+        shape = w.shape
+      shape = tuple(-1 if x is None else x for x in shape)
+      w = tf.reshape(w, shape + (1,) * (len(losses.shape) - len(w.shape)))
 
-  def default_generator(
-      self,
-      dataset: Dataset,
-      epochs: int = 1,
-      mode: str = 'fit',
-      deterministic: bool = True,
-      pad_batches: bool = True) -> Iterable[Tuple[List, List, List]]:
-    for epoch in range(epochs):
-      for (X_b, y_b, w_b, ids_b) in dataset.iterbatches(
-          batch_size=self.batch_size,
-          deterministic=deterministic,
-          pad_batches=pad_batches):
-        if y_b is not None:
-          y_b = to_one_hot(y_b.flatten(), self.n_classes).reshape(
-              -1, self.n_tasks, self.n_classes)
-        yield ([X_b], [y_b], [w_b])
+    loss = losses * w
+    return tf.reduce_mean(loss) + sum(self.model.losses)

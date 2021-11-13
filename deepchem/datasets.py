@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tupl
 
 import numpy as np
 import pandas as pd
+import torch
 
 #import deepchem as dc
 from dctyping import ArrayLike, OneOrMany, Shape
@@ -2195,3 +2196,376 @@ def save_transformers(save_dir: str,
   """Save the transformers for a MoleculeNet dataset to disk."""
   with open(os.path.join(save_dir, "transformers.pkl"), 'wb') as f:
     pickle.dump(transformers, f)
+
+
+class NumpyDataset(Dataset):
+  """A Dataset defined by in-memory numpy arrays.
+  This subclass of `Dataset` stores arrays `X,y,w,ids` in memory as
+  numpy arrays. This makes it very easy to construct `NumpyDataset`
+  objects.
+  Examples
+  --------
+  >>> import numpy as np
+  >>> dataset = NumpyDataset(X=np.random.rand(5, 3), y=np.random.rand(5,), ids=np.arange(5))
+  """
+
+  def __init__(self,
+               X: ArrayLike,
+               y: Optional[ArrayLike] = None,
+               w: Optional[ArrayLike] = None,
+               ids: Optional[ArrayLike] = None,
+               n_tasks: int = 1) -> None:
+    """Initialize this object.
+    Parameters
+    ----------
+    X: np.ndarray
+      Input features. A numpy array of shape `(n_samples,...)`.
+    y: np.ndarray, optional (default None)
+      Labels. A numpy array of shape `(n_samples, ...)`. Note that each label can
+      have an arbitrary shape.
+    w: np.ndarray, optional (default None)
+      Weights. Should either be 1D array of shape `(n_samples,)` or if
+      there's more than one task, of shape `(n_samples, n_tasks)`.
+    ids: np.ndarray, optional (default None)
+      Identifiers. A numpy array of shape `(n_samples,)`
+    n_tasks: int, default 1
+      Number of learning tasks.
+    """
+    n_samples = len(X)
+    if n_samples > 0:
+      if y is None:
+        # Set labels to be zero, with zero weights
+        y = np.zeros((n_samples, n_tasks), np.float32)
+        w = np.zeros((n_samples, 1), np.float32)
+    if ids is None:
+      ids = np.arange(n_samples)
+    if not isinstance(X, np.ndarray):
+      X = np.array(X)
+    if not isinstance(y, np.ndarray):
+      y = np.array(y)
+    if w is None:
+      if len(y.shape) == 1:
+        w = np.ones(y.shape[0], np.float32)
+      else:
+        w = np.ones((y.shape[0], 1), np.float32)
+    if not isinstance(w, np.ndarray):
+      w = np.array(w)
+    self._X = X
+    self._y = y
+    self._w = w
+    self._ids = np.array(ids, dtype=object)
+
+  def __len__(self) -> int:
+    """Get the number of elements in the dataset."""
+    return len(self._y)
+
+  def get_shape(self) -> Tuple[Shape, Shape, Shape, Shape]:
+    """Get the shape of the dataset.
+    Returns four tuples, giving the shape of the X, y, w, and ids arrays.
+    """
+    return self._X.shape, self._y.shape, self._w.shape, self._ids.shape
+
+  def get_task_names(self) -> np.ndarray:
+    """Get the names of the tasks associated with this dataset."""
+    if len(self._y.shape) < 2:
+      return np.array([0])
+    return np.arange(self._y.shape[1])
+
+  @property
+  def X(self) -> np.ndarray:
+    """Get the X vector for this dataset as a single numpy array."""
+    return self._X
+
+  @property
+  def y(self) -> np.ndarray:
+    """Get the y vector for this dataset as a single numpy array."""
+    return self._y
+
+  @property
+  def ids(self) -> np.ndarray:
+    """Get the ids vector for this dataset as a single numpy array."""
+    return self._ids
+
+  @property
+  def w(self) -> np.ndarray:
+    """Get the weight vector for this dataset as a single numpy array."""
+    return self._w
+
+  def iterbatches(self,
+                  batch_size: Optional[int] = None,
+                  epochs: int = 1,
+                  deterministic: bool = False,
+                  pad_batches: bool = False) -> Iterator[Batch]:
+    """Get an object that iterates over minibatches from the dataset.
+    Each minibatch is returned as a tuple of four numpy arrays:
+    `(X, y, w, ids)`.
+    Parameters
+    ----------
+    batch_size: int, optional (default None)
+      Number of elements in each batch.
+    epochs: int, default 1
+      Number of epochs to walk over dataset.
+    deterministic: bool, optional (default False)
+      If True, follow deterministic order.
+    pad_batches: bool, optional (default False)
+      If True, pad each batch to `batch_size`.
+    Returns
+    -------
+    Iterator[Batch]
+      Generator which yields tuples of four numpy arrays `(X, y, w, ids)`.
+    """
+
+    def iterate(dataset: NumpyDataset, batch_size: Optional[int], epochs: int,
+                deterministic: bool, pad_batches: bool):
+      n_samples = dataset._X.shape[0]
+      if deterministic:
+        sample_perm = np.arange(n_samples)
+      if batch_size is None:
+        batch_size = n_samples
+      for epoch in range(epochs):
+        if not deterministic:
+          sample_perm = np.random.permutation(n_samples)
+        batch_idx = 0
+        num_batches = math.ceil(n_samples / batch_size)
+        while batch_idx < num_batches:
+          start = batch_idx * batch_size
+          end = min(n_samples, (batch_idx + 1) * batch_size)
+          indices = range(start, end)
+          perm_indices = sample_perm[indices]
+          X_batch = dataset._X[perm_indices]
+          y_batch = dataset._y[perm_indices]
+          w_batch = dataset._w[perm_indices]
+          ids_batch = dataset._ids[perm_indices]
+          if pad_batches:
+            (X_batch, y_batch, w_batch, ids_batch) = pad_batch(
+                batch_size, X_batch, y_batch, w_batch, ids_batch)
+          batch_idx += 1
+          yield (X_batch, y_batch, w_batch, ids_batch)
+
+    return iterate(self, batch_size, epochs, deterministic, pad_batches)
+
+  def itersamples(self) -> Iterator[Batch]:
+    """Get an object that iterates over the samples in the dataset.
+    Returns
+    -------
+    Iterator[Batch]
+      Iterator which yields tuples of four numpy arrays `(X, y, w, ids)`.
+    Examples
+    --------
+    >>> dataset = NumpyDataset(np.ones((2,2)))
+    >>> for x, y, w, id in dataset.itersamples():
+    ...   print(x.tolist(), y.tolist(), w.tolist(), id)
+    [1.0, 1.0] [0.0] [0.0] 0
+    [1.0, 1.0] [0.0] [0.0] 1
+    """
+    n_samples = self._X.shape[0]
+    return ((self._X[i], self._y[i], self._w[i], self._ids[i])
+            for i in range(n_samples))
+
+  def transform(self, transformer: "dc.trans.Transformer",
+                **args) -> "NumpyDataset":
+    """Construct a new dataset by applying a transformation to every sample in this dataset.
+    The argument is a function that can be called as follows:
+    >> newx, newy, neww = fn(x, y, w)
+    It might be called only once with the whole dataset, or multiple
+    times with different subsets of the data.  Each time it is called,
+    it should transform the samples and return the transformed data.
+    Parameters
+    ----------
+    transformer: dc.trans.Transformer
+      The transformation to apply to each sample in the dataset
+    Returns
+    -------
+    NumpyDataset
+      A newly constructed NumpyDataset object
+    """
+    newx, newy, neww, newids = transformer.transform_array(
+        self._X, self._y, self._w, self._ids)
+    return NumpyDataset(newx, newy, neww, newids)
+
+  def select(self, indices: Sequence[int],
+             select_dir: Optional[str] = None) -> "NumpyDataset":
+    """Creates a new dataset from a selection of indices from self.
+    Parameters
+    ----------
+    indices: List[int]
+      List of indices to select.
+    select_dir: str, optional (default None)
+      Used to provide same API as `DiskDataset`. Ignored since
+      `NumpyDataset` is purely in-memory.
+    Returns
+    -------
+    NumpyDataset
+      A selected NumpyDataset object
+    """
+    X = self.X[indices]
+    y = self.y[indices]
+    w = self.w[indices]
+    ids = self.ids[indices]
+    return NumpyDataset(X, y, w, ids)
+
+  def make_pytorch_dataset(self,
+                           epochs: int = 1,
+                           deterministic: bool = False,
+                           batch_size: Optional[int] = None):
+    """Create a torch.utils.data.IterableDataset that iterates over the data in this Dataset.
+    Each value returned by the Dataset's iterator is a tuple of (X, y, w, id)
+    containing the data for one batch, or for a single sample if batch_size is None.
+    Parameters
+    ----------
+    epochs: int, default 1
+      The number of times to iterate over the Dataset
+    deterministic: bool, default False
+      If True, the data is produced in order. If False, a different
+      random permutation of the data is used for each epoch.
+    batch_size: int, optional (default None)
+      The number of samples to return in each batch. If None, each returned
+      value is a single sample.
+    Returns
+    -------
+    torch.utils.data.IterableDataset
+      `torch.utils.data.IterableDataset` that iterates over the data in
+      this dataset.
+    Note
+    ----
+    This method requires PyTorch to be installed.
+    """
+    pytorch_ds = _TorchNumpyDataset(
+        numpy_dataset=self,
+        epochs=epochs,
+        deterministic=deterministic,
+        batch_size=batch_size)
+    return pytorch_ds
+
+  @staticmethod
+  def from_DiskDataset(ds: "DiskDataset") -> "NumpyDataset":
+    """Convert DiskDataset to NumpyDataset.
+    Parameters
+    ----------
+    ds: DiskDataset
+      DiskDataset to transform to NumpyDataset.
+    Returns
+    -------
+    NumpyDataset
+      A new NumpyDataset created from DiskDataset.
+    """
+    return NumpyDataset(ds.X, ds.y, ds.w, ds.ids)
+
+  def to_json(self, fname: str) -> None:
+    """Dump NumpyDataset to the json file .
+    Parameters
+    ----------
+    fname: str
+      The name of the json file.
+    """
+    d = {
+        'X': self.X.tolist(),
+        'y': self.y.tolist(),
+        'w': self.w.tolist(),
+        'ids': self.ids.tolist()
+    }
+    with open(fname, 'w') as fout:
+      json.dump(d, fout)
+
+  @staticmethod
+  def from_json(fname: str) -> "NumpyDataset":
+    """Create NumpyDataset from the json file.
+    Parameters
+    ----------
+    fname: str
+      The name of the json file.
+    Returns
+    -------
+    NumpyDataset
+      A new NumpyDataset created from the json file.
+    """
+    with open(fname) as fin:
+      d = json.load(fin)
+      return NumpyDataset(d['X'], d['y'], d['w'], d['ids'])
+
+  @staticmethod
+  def merge(datasets: Sequence[Dataset]) -> "NumpyDataset":
+    """Merge multiple NumpyDatasets.
+    Parameters
+    ----------
+    datasets: List[Dataset]
+      List of datasets to merge.
+    Returns
+    -------
+    NumpyDataset
+      A single NumpyDataset containing all the samples from all datasets.
+    Example
+    -------
+    >>> X1, y1 = np.random.rand(5, 3), np.random.randn(5, 1)
+    >>> first_dataset = dc.data.NumpyDataset(X1, y1)
+    >>> X2, y2 = np.random.rand(5, 3), np.random.randn(5, 1)
+    >>> second_dataset = dc.data.NumpyDataset(X2, y2)
+    >>> merged_dataset = dc.data.NumpyDataset.merge([first_dataset, second_dataset])
+    >>> print(len(merged_dataset) == len(first_dataset) + len(second_dataset))
+    True
+    """
+    X, y, w, ids = datasets[0].X, datasets[0].y, datasets[0].w, datasets[0].ids
+    for dataset in datasets[1:]:
+      X = np.concatenate([X, dataset.X], axis=0)
+      y = np.concatenate([y, dataset.y], axis=0)
+      w = np.concatenate([w, dataset.w], axis=0)
+      ids = np.concatenate(
+          [ids, dataset.ids],
+          axis=0,
+      )
+
+    return NumpyDataset(X, y, w, ids, n_tasks=y.shape[1])
+
+
+class _TorchNumpyDataset(torch.utils.data.IterableDataset):  # type: ignore
+
+  def __init__(self,
+               numpy_dataset: NumpyDataset,
+               epochs: int,
+               deterministic: bool,
+               batch_size: int = None):
+    """
+    Parameters
+    ----------
+    numpy_dataset: NumpyDataset
+      The original NumpyDataset which you want to convert to PyTorch Dataset
+    epochs: int
+      the number of times to iterate over the Dataset
+    deterministic: bool
+      if True, the data is produced in order.  If False, a different random
+      permutation of the data is used for each epoch.
+    batch_size: int
+      the number of samples to return in each batch.  If None, each returned
+      value is a single sample.
+    """
+    self.numpy_dataset = numpy_dataset
+    self.epochs = epochs
+    self.deterministic = deterministic
+    self.batch_size = batch_size
+
+  def __iter__(self):
+    n_samples = self.numpy_dataset._X.shape[0]
+    worker_info = torch.utils.data.get_worker_info()
+    if worker_info is None:
+      first_sample = 0
+      last_sample = n_samples
+    else:
+      first_sample = worker_info.id * n_samples // worker_info.num_workers
+      last_sample = (worker_info.id + 1) * n_samples // worker_info.num_workers
+    for epoch in range(self.epochs):
+      if self.deterministic:
+        order = first_sample + np.arange(last_sample - first_sample)
+      else:
+        # Ensure that every worker will pick the same random order for each epoch.
+        random = np.random.RandomState(epoch)
+        order = random.permutation(n_samples)[first_sample:last_sample]
+      if self.batch_size is None:
+        for i in order:
+          yield (self.numpy_dataset._X[i], self.numpy_dataset._y[i],
+                 self.numpy_dataset._w[i], self.numpy_dataset._ids[i])
+      else:
+        for i in range(0, len(order), self.batch_size):
+          indices = order[i:i + self.batch_size]
+          yield (self.numpy_dataset._X[indices], self.numpy_dataset._y[indices],
+                 self.numpy_dataset._w[indices],
+                 self.numpy_dataset._ids[indices])

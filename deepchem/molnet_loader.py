@@ -7,6 +7,7 @@ import logging
 from datasets import Dataset, DiskDataset, load_dataset_from_disk, save_dataset_to_disk, load_transformers
 from typing import List, Optional, Tuple, Type, Union
 from circular_fingerprint import CircularFingerprint
+from graph_features import ConvMolFeaturizer
 from splitters import ScaffoldSplitter, RandomStratifiedSplitter
 from dctransformers import Transformer, BalancingTransformer
 
@@ -47,11 +48,12 @@ class TransformerGenerator(object):
 
 featurizers = {
     'ecfp': CircularFingerprint(size=1024),
+    'graphconv': ConvMolFeaturizer()
 }
 
 splitters = {
 #    'scaffold': ScaffoldSplitter(),
-    'stratified': RandomStratifiedSplitter()
+    'stratified': RandomStratifiedSplitter(),
 }
 
 transformers = {

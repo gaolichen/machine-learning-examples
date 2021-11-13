@@ -210,5 +210,6 @@ class MolecularFeaturizer(Featurizer):
             mol)
         logger.warning("Exception message: {}".format(e))
         features.append(np.array([]))
+        raise e
 
     return np.asarray(features)
